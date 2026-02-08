@@ -4,20 +4,19 @@ DOWNLOAD_FILE="downloads.txt"
 COMPLETED_FILE="completed.txt"
 FAILED_FILE="failed.txt"
 DOWNLOAD_DIR="downloads"
+PROCESSING_FILE="processing.txt"
 
 # Create download directory if it doesn't exist
 mkdir -p "$DOWNLOAD_DIR"
 
-if [ ! -f "$DOWNLOAD_FILE" ]; then
-    echo "$DOWNLOAD_FILE not found!"
-    exit 0
-fi
-
-# Check if file is empty
-if [ ! -s "$DOWNLOAD_FILE" ]; then
+if [ ! -f "$DOWNLOAD_FILE" ] || [ ! -s "$DOWNLOAD_FILE" ]; then
     echo "No downloads pending."
     exit 0
 fi
+
+# Move downloads to a temporary processing file to avoid race conditions
+mv "$DOWNLOAD_FILE" "$PROCESSING_FILE"
+touch "$DOWNLOAD_FILE"
 
 # Process each line
 while IFS= read -r link || [ -n "$link" ]; do
@@ -29,42 +28,59 @@ while IFS= read -r link || [ -n "$link" ]; do
     echo "Processing: $link"
 
     # Download using aria2c
-    # --seed-time=0 ensures torrents stop seeding immediately after download
-    # -x16 -s16: Use 16 connections/servers for faster downloads
-    # -k1M: Use 1MB chunks
-    aria2c --seed-time=0 -x16 -s16 -k1M --dir="$DOWNLOAD_DIR" "$link"
+    # --seed-time=0: Stop seeding immediately
+    # -x8 -s8: 8 connections (polite)
+    # -k1M: 1MB chunks
+    # --: End of options, prevents argument injection
+    aria2c --seed-time=0 -x8 -s8 -k1M --dir="$DOWNLOAD_DIR" -- "$link"
 
     if [ $? -eq 0 ]; then
         echo "Download successful."
 
         # Upload to rclone remote
-    RCLONE_REMOTE=${RCLONE_REMOTE:-mega}
-    echo "Uploading to $RCLONE_REMOTE..."
-    rclone copy "$DOWNLOAD_DIR" "$RCLONE_REMOTE:" -v
-
-    if [ $? -eq 0 ]; then
-        echo "Upload successful."
-        # Append to completed file
-        echo "$link" >> "$COMPLETED_FILE"
+        # Default to 'remote' if not set
+        RCLONE_REMOTE=${RCLONE_REMOTE:-remote}
         
-        # Remove the processed link from downloads.txt
-        # specific to the exact line match to avoid partial matches
-        grep -Fxv "$link" "$DOWNLOAD_FILE" > "${DOWNLOAD_FILE}.tmp" && mv "${DOWNLOAD_FILE}.tmp" "$DOWNLOAD_FILE"
+        if ! rclone listremotes | grep -q "^${RCLONE_REMOTE}:"; then
+             echo "Warning: Remote '${RCLONE_REMOTE}' not found in configuration."
+        fi
 
-        # Clean up downloaded files
-        rm -rf "$DOWNLOAD_DIR"/*
+        echo "Uploading to $RCLONE_REMOTE..."
+        rclone copy "$DOWNLOAD_DIR" "$RCLONE_REMOTE:" -v
+
+        if [ $? -eq 0 ]; then
+            echo "Upload successful."
+            # Append to completed file
+            echo "$link" >> "$COMPLETED_FILE"
+            
+            # Clean up downloaded files safely
+            if [ -d "$DOWNLOAD_DIR" ] && [ -n "$DOWNLOAD_DIR" ]; then
+                find "$DOWNLOAD_DIR" -mindepth 1 -delete
+            fi
         else
             echo "Upload failed for $link"
+            echo "$link" >> "$FAILED_FILE"
+            # Add back to downloads.txt for retry
+            echo "$link" >> "$DOWNLOAD_FILE"
+            
+            # Clean up partial downloads safely
+            if [ -d "$DOWNLOAD_DIR" ] && [ -n "$DOWNLOAD_DIR" ]; then
+                find "$DOWNLOAD_DIR" -mindepth 1 -delete
+            fi
         fi
     else
         echo "Download failed for $link"
         echo "$link" >> "$FAILED_FILE"
+        # Add back to downloads.txt for retry
+        echo "$link" >> "$DOWNLOAD_FILE"
         
-        # Remove the failed link from downloads.txt
-        grep -Fxv "$link" "$DOWNLOAD_FILE" > "${DOWNLOAD_FILE}.tmp" && mv "${DOWNLOAD_FILE}.tmp" "$DOWNLOAD_FILE"
-        
-        # Clean up partial downloads if any
-        rm -rf "$DOWNLOAD_DIR"/*
+        # Clean up partial downloads safely
+        if [ -d "$DOWNLOAD_DIR" ] && [ -n "$DOWNLOAD_DIR" ]; then
+            find "$DOWNLOAD_DIR" -mindepth 1 -delete
+        fi
     fi
 
-done < "$DOWNLOAD_FILE"
+done < "$PROCESSING_FILE"
+
+# Remove the processing file
+rm "$PROCESSING_FILE"

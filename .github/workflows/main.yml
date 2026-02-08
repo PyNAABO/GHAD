@@ -18,7 +18,7 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y aria2
-          curl https://rclone.org/install.sh | sudo bash
+          sudo -v ; curl https://rclone.org/install.sh | sudo bash
 
       - name: Configure Rclone
         env:
@@ -41,5 +41,17 @@ jobs:
           git checkout process.sh
 
           git add downloads.txt completed.txt failed.txt
+
           # Only commit if there are changes
-          git diff --quiet && git diff --staged --quiet || (git commit -m "Update downloads and completed lists" && git pull --rebase && git push)
+          if ! git diff --quiet || ! git diff --staged --quiet; then
+            git commit -m "Update downloads and completed lists"
+            
+            # Retry loop for push to handle race conditions
+            n=0
+            until [ "$n" -ge 5 ]
+            do
+               git pull --rebase && git push && break
+               n=$((n+1))
+               sleep 5
+            done
+          fi
