@@ -28,6 +28,8 @@ jobs:
           echo "$RCLONE_CONF" > ~/.config/rclone/rclone.conf
 
       - name: Run Processing Script
+        env:
+          RCLONE_REMOTE: mega
         run: |
           chmod +x process.sh
           ./process.sh
