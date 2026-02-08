@@ -2,6 +2,7 @@
 
 DOWNLOAD_FILE="downloads.txt"
 COMPLETED_FILE="completed.txt"
+FAILED_FILE="failed.txt"
 DOWNLOAD_DIR="downloads"
 
 # Create download directory if it doesn't exist
@@ -57,6 +58,13 @@ while IFS= read -r link || [ -n "$link" ]; do
         fi
     else
         echo "Download failed for $link"
+        echo "$link" >> "$FAILED_FILE"
+        
+        # Remove the failed link from downloads.txt
+        grep -Fxv "$link" "$DOWNLOAD_FILE" > "${DOWNLOAD_FILE}.tmp" && mv "${DOWNLOAD_FILE}.tmp" "$DOWNLOAD_FILE"
+        
+        # Clean up partial downloads if any
+        rm -rf "$DOWNLOAD_DIR"/*
     fi
 
 done < "$DOWNLOAD_FILE"

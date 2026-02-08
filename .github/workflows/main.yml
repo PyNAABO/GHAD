@@ -40,6 +40,6 @@ jobs:
           # Discard changes to process.sh (like chmod)
           git checkout process.sh
 
-          git add downloads.txt completed.txt
+          git add downloads.txt completed.txt failed.txt
           # Only commit if there are changes
           git diff --quiet && git diff --staged --quiet || (git commit -m "Update downloads and completed lists" && git pull --rebase && git push)
