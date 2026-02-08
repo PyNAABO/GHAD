@@ -1,0 +1,41 @@
+name: Download and Upload
+
+on:
+  push:
+    paths:
+      - "downloads.txt"
+  workflow_dispatch:
+
+jobs:
+  download-and-upload:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y aria2
+          curl https://rclone.org/install.sh | sudo bash
+
+      - name: Configure Rclone
+        env:
+          RCLONE_CONF: ${{ secrets.RCLONE_CONF }}
+        run: |
+          mkdir -p ~/.config/rclone
+          echo "$RCLONE_CONF" > ~/.config/rclone/rclone.conf
+
+      - name: Run Processing Script
+        run: |
+          chmod +x process.sh
+          ./process.sh
+
+      - name: Commit and Push changes
+        run: |
+          git config --global user.name "GitHub Action"
+          git config --global user.email "action@github.com"
+          git add downloads.txt completed.txt
+          # Only commit if there are changes
+          git diff --quiet && git diff --staged --quiet || (git commit -m "Update downloads and completed lists" && git push)
