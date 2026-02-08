@@ -42,4 +42,4 @@ jobs:
 
           git add downloads.txt completed.txt
           # Only commit if there are changes
-          git diff --quiet && git diff --staged --quiet || (git commit -m "Update downloads and completed lists" && git push)
+          git diff --quiet && git diff --staged --quiet || (git commit -m "Update downloads and completed lists" && git pull --rebase && git push)
