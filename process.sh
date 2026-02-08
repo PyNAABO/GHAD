@@ -29,7 +29,9 @@ while IFS= read -r link || [ -n "$link" ]; do
 
     # Download using aria2c
     # --seed-time=0 ensures torrents stop seeding immediately after download
-    aria2c --seed-time=0 --dir="$DOWNLOAD_DIR" "$link"
+    # -x16 -s16: Use 16 connections/servers for faster downloads
+    # -k1M: Use 1MB chunks
+    aria2c --seed-time=0 -x16 -s16 -k1M --dir="$DOWNLOAD_DIR" "$link"
 
     if [ $? -eq 0 ]; then
         echo "Download successful."
