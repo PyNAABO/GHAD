@@ -23,27 +23,62 @@ touch "$DOWNLOAD_FILE"
 
 # Process each line
 while IFS= read -r link || [ -n "$link" ]; do
-    # Skip empty lines
+    # Skip empty lines and strip carriage returns (handle Windows line endings)
+    link=$(echo "$link" | tr -d '\r')
     if [ -z "$link" ]; then
         continue
     fi
 
+    echo "========================================"
     echo "Processing: $link"
+    echo "========================================"
 
-    # Download using aria2c
-    # --seed-time=0: Stop seeding immediately
-    # -x8 -s8: 8 connections (polite)
-    # -k1M: 1MB chunks
-    # --: End of options, prevents argument injection
-    aria2c --seed-time=0 -x8 -s8 -k1M --dir="$DOWNLOAD_DIR" -- "$link"
+    DOWNLOAD_SUCCESS=false
 
-    if [ $? -eq 0 ]; then
+    # Method 1: Try yt-dlp first (supports 1000+ sites)
+    if command -v yt-dlp &> /dev/null; then
+        echo "[1/3] Trying yt-dlp..."
+        yt-dlp --no-playlist -o "$DOWNLOAD_DIR/%(title)s.%(ext)s" -- "$link" 2>&1
+        if [ $? -eq 0 ]; then
+            echo "[✓] yt-dlp succeeded"
+            DOWNLOAD_SUCCESS=true
+        else
+            echo "[✗] yt-dlp failed"
+        fi
+    fi
+
+    # Method 2: Try aria2c if yt-dlp didn't succeed
+    if [ "$DOWNLOAD_SUCCESS" = false ]; then
+        echo "[2/3] Trying aria2c..."
+        aria2c --seed-time=0 -x8 -s8 -k1M --dir="$DOWNLOAD_DIR" -- "$link" 2>&1
+        if [ $? -eq 0 ]; then
+            echo "[✓] aria2c succeeded"
+            DOWNLOAD_SUCCESS=true
+        else
+            echo "[✗] aria2c failed"
+        fi
+    fi
+
+    # Method 3: Try browser download as last resort (requires Playwright)
+    if [ "$DOWNLOAD_SUCCESS" = false ] && [ -f "browser_download.py" ]; then
+        echo "[3/3] Trying browser download..."
+        FILENAME=$(echo "$link" | md5sum | cut -c1-16).mp4
+        python3 browser_download.py "$link" "$FILENAME" 2>&1
+        if [ $? -eq 0 ] && [ -f "$DOWNLOAD_DIR/$FILENAME" ]; then
+            echo "[✓] Browser download succeeded"
+            DOWNLOAD_SUCCESS=true
+        else
+            echo "[✗] Browser download failed"
+        fi
+    fi
+
+    # Handle result
+    if [ "$DOWNLOAD_SUCCESS" = true ]; then
         echo "Download successful."
 
         # Upload to rclone remote
-        # Default to 'remote' if not set
         RCLONE_REMOTE=${RCLONE_REMOTE:-remote}
-        
+
         if ! rclone listremotes | grep -q "^${RCLONE_REMOTE}:"; then
              echo "Warning: Remote '${RCLONE_REMOTE}' not found in configuration."
         fi
@@ -53,26 +88,23 @@ while IFS= read -r link || [ -n "$link" ]; do
 
         if [ $? -eq 0 ]; then
             echo "Upload successful."
-            # Append to completed file
             echo "$link" >> "$COMPLETED_FILE"
-            
-            # Clean up downloaded files safely
+
+            # Clean up downloaded files
             if [ -d "$DOWNLOAD_DIR" ] && [ -n "$DOWNLOAD_DIR" ]; then
                 find "$DOWNLOAD_DIR" -mindepth 1 -delete
             fi
         else
             echo "Upload failed for $link"
             echo "$link" >> "$FAILED_FILE"
-            # Clean up partial downloads safely
             if [ -d "$DOWNLOAD_DIR" ] && [ -n "$DOWNLOAD_DIR" ]; then
                 find "$DOWNLOAD_DIR" -mindepth 1 -delete
             fi
         fi
     else
-        echo "Download failed for $link"
+        echo "Download FAILED for $link"
         echo "$link" >> "$FAILED_FILE"
-        
-        # Clean up partial downloads safely
+
         if [ -d "$DOWNLOAD_DIR" ] && [ -n "$DOWNLOAD_DIR" ]; then
             find "$DOWNLOAD_DIR" -mindepth 1 -delete
         fi
@@ -82,3 +114,5 @@ done < "$PROCESSING_FILE"
 
 # Remove the processing file
 rm "$PROCESSING_FILE"
+
+echo "Done!"
