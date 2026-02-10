@@ -21,6 +21,17 @@ fi
 mv "$DOWNLOAD_FILE" "$PROCESSING_FILE"
 touch "$DOWNLOAD_FILE"
 
+# Check if URL is a direct video file (not a webpage)
+is_direct_video() {
+    local url="$1"
+    [[ "$url" =~ \.(mp4|mkv|webm|avi|mov|flv|wmv|m4v|3gp|flac|mkv)$ ]] || \
+    [[ "$url" =~ /video/ ]] || \
+    [[ "$url" =~ /get_file/ ]] || \
+    [[ "$url" =~ /download/ ]] || \
+    [[ "$url" =~ \.mp4\? ]] || \
+    [[ "$url" =~ \.m3u8 ]]
+}
+
 # Process each line
 while IFS= read -r link || [ -n "$link" ]; do
     # Skip empty lines and strip carriage returns (handle Windows line endings)
@@ -34,11 +45,26 @@ while IFS= read -r link || [ -n "$link" ]; do
     echo "========================================"
 
     DOWNLOAD_SUCCESS=false
+    IS_WEBPAGE=false
 
-    # Method 1: Try yt-dlp first (supports 1000+ sites)
+    # Check if this is a webpage (not a direct video file)
+    if ! is_direct_video "$link"; then
+        IS_WEBPAGE=true
+        echo "[INFO] Webpage URL detected - using page extraction"
+    fi
+
+    # Method 1: yt-dlp first (best for pages AND direct links)
     if command -v yt-dlp &> /dev/null; then
         echo "[1/3] Trying yt-dlp..."
-        yt-dlp --no-playlist -o "$DOWNLOAD_DIR/%(title)s.%(ext)s" -- "$link" 2>&1
+
+        if [ "$IS_WEBPAGE" = true ]; then
+            # For webpages, try with Cloudflare impersonation
+            yt-dlp --extractor-args "generic:impersonate" -o "$DOWNLOAD_DIR/%(title)s.%(ext)s" -- "$link" 2>&1
+        else
+            # For direct links, use simpler options
+            yt-dlp -o "$DOWNLOAD_DIR/%(title)s.%(ext)s" -- "$link" 2>&1
+        fi
+
         if [ $? -eq 0 ]; then
             echo "[✓] yt-dlp succeeded"
             DOWNLOAD_SUCCESS=true
@@ -47,9 +73,9 @@ while IFS= read -r link || [ -n "$link" ]; do
         fi
     fi
 
-    # Method 2: Try aria2c if yt-dlp didn't succeed
-    if [ "$DOWNLOAD_SUCCESS" = false ]; then
-        echo "[2/3] Trying aria2c..."
+    # Method 2: aria2c ONLY for direct video files (not webpages)
+    if [ "$DOWNLOAD_SUCCESS" = false ] && [ "$IS_WEBPAGE" = false ]; then
+        echo "[2/3] Trying aria2c (direct video link)..."
         aria2c --seed-time=0 -x8 -s8 -k1M --dir="$DOWNLOAD_DIR" -- "$link" 2>&1
         if [ $? -eq 0 ]; then
             echo "[✓] aria2c succeeded"
@@ -57,10 +83,12 @@ while IFS= read -r link || [ -n "$link" ]; do
         else
             echo "[✗] aria2c failed"
         fi
+    elif [ "$IS_WEBPAGE" = true ]; then
+        echo "[2/3] Skipping aria2c (not a direct video link)"
     fi
 
-    # Method 3: Try browser download as last resort (requires Playwright)
-    if [ "$DOWNLOAD_SUCCESS" = false ] && [ -f "browser_download.py" ]; then
+    # Method 3: Browser fallback for webpages that yt-dlp couldn't handle
+    if [ "$DOWNLOAD_SUCCESS" = false ] && [ "$IS_WEBPAGE" = true ] && [ -f "browser_download.py" ]; then
         echo "[3/3] Trying browser download..."
         FILENAME=$(echo "$link" | md5sum | cut -c1-16).mp4
         python3 browser_download.py "$link" "$FILENAME" 2>&1
