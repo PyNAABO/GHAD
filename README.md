@@ -6,9 +6,10 @@ Automate file downloads (torrents & direct links) using GitHub Actions and uploa
 
 - **Automated Downloads**: Triggers on push to `downloads.txt`.
 - **Multi-Protocol Support**: Handles HTTP/HTTPS direct links and Torrents/Magnets via `aria2c`.
+- **Streaming Sites**: Supports 1000+ sites via `yt-dlp` (YouTube, Vimeo, Dailymotion, etc.).
 - **Cloud Upload**: Automatically uploads finished downloads to any Rclone-supported cloud storage (Google Drive, Mega, OneDrive, etc.).
 - **Smart Processing**:
-  - Retries failed downloads automatically.
+  - Deduplicates failed links automatically.
   - Moves successful links to `completed.txt`.
   - Tracks failed links in `failed.txt`.
 - **Secure**: Prevents argument injection and handles file operations safely.
@@ -43,6 +44,8 @@ env:
     ```text
     https://example.com/file.zip
     magnet:?xt=urn:btih:EXAMPLE...
+    https://youtube.com/watch?v=...
+    https://vimeo.com/...
     ```
 2.  **Commit & Push**:
     ```bash
@@ -60,3 +63,4 @@ env:
 
 - **Torrents**: Seeding is disabled (`--seed-time=0`) to save resources.
 - **Large Files**: GitHub Actions has storage limits (~14GB disk space). For larger files, consider using a self-hosted runner.
+- **Blob URLs**: Blob URLs (`blob:https://...`) cannot be downloaded directly. Open the video in a browser, open Developer Tools (F12) → Network tab, find the actual source file (`.mp4`, `.m3u8`, or manifest URL), and add that URL instead.

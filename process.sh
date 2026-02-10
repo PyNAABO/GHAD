@@ -6,7 +6,10 @@ FAILED_FILE="failed.txt"
 DOWNLOAD_DIR="downloads"
 PROCESSING_FILE="processing.txt"
 
-# Create download directory if it doesn't exist
+# Deduplicate failed.txt if it exists
+if [ -f "$FAILED_FILE" ] && [ -s "$FAILED_FILE" ]; then
+    awk '!seen[$0]++' "$FAILED_FILE" > "${FAILED_FILE}.tmp" && mv "${FAILED_FILE}.tmp" "$FAILED_FILE"
+fi
 mkdir -p "$DOWNLOAD_DIR"
 
 if [ ! -f "$DOWNLOAD_FILE" ] || [ ! -s "$DOWNLOAD_FILE" ]; then
@@ -60,9 +63,6 @@ while IFS= read -r link || [ -n "$link" ]; do
         else
             echo "Upload failed for $link"
             echo "$link" >> "$FAILED_FILE"
-            # Add back to downloads.txt for retry
-            echo "$link" >> "$DOWNLOAD_FILE"
-            
             # Clean up partial downloads safely
             if [ -d "$DOWNLOAD_DIR" ] && [ -n "$DOWNLOAD_DIR" ]; then
                 find "$DOWNLOAD_DIR" -mindepth 1 -delete
@@ -71,8 +71,6 @@ while IFS= read -r link || [ -n "$link" ]; do
     else
         echo "Download failed for $link"
         echo "$link" >> "$FAILED_FILE"
-        # Add back to downloads.txt for retry
-        echo "$link" >> "$DOWNLOAD_FILE"
         
         # Clean up partial downloads safely
         if [ -d "$DOWNLOAD_DIR" ] && [ -n "$DOWNLOAD_DIR" ]; then
