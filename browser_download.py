@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Smart browser-based downloader for pages with multiple videos."""
+"""Smart browser-based downloader for pages with Cloudflare protection."""
 
 import asyncio
 import os
@@ -13,167 +13,173 @@ from playwright.async_api import async_playwright
 DOWNLOAD_DIR = "downloads"
 
 def run_yt_dlp(url):
-    """Try yt-dlp first for page extraction."""
-    print(f"  [Browser] Trying yt-dlp page extraction...")
+    """Try yt-dlp with fallback options."""
+    print(f"  [Browser] Trying yt-dlp...")
     result = subprocess.run(
-        ['yt-dlp', '--no-playlist', '-J', '--flat-playlist', url],
-        capture_output=True, text=True, timeout=60
+        ['yt-dlp', '--no-playlist', '-o', f'{DOWNLOAD_DIR}/%(title)s.%(ext)s', '--', url],
+        capture_output=True, text=True, timeout=600
     )
     if result.returncode == 0:
-        return result.stdout
-    return None
+        return True
+    return False
 
-def extract_urls_from_json(json_output):
-    """Extract URLs from yt-dlp JSON output."""
-    try:
-        import json
-        data = json.loads(json_output)
-        urls = []
-        if 'url' in data:
-            urls.append(data['url'])
-        if 'entries' in data:
-            for entry in data['entries']:
-                if entry and 'url' in entry:
-                    urls.append(entry['url'])
-        return urls
-    except:
-        return []
-
-async def find_main_video_on_page(page, url):
-    """Find the main video on a page by looking for video elements and download links."""
+async def find_video_urls_on_page(page, url):
+    """Find all video URLs on page including embed/API sources."""
     video_urls = []
-    video_info = []
-
-    # Look for <video> elements with src
+    
+    # Look for video elements
     videos = await page.query_selector_all("video")
     for video in videos:
         src = await video.get_attribute("src")
+        poster = await video.get_attribute("poster")
         if src:
-            video_urls.append(src)
-            duration = await video.get_attribute("duration")
-            info = await video.evaluate("""
-                (el) => {
-                    return {
-                        width: el.videoWidth,
-                        height: el.videoHeight,
-                        duration: el.duration
-                    };
-                }
-            """)
-            video_info.append((src, info))
-            print(f"  [Browser] Found <video> src: {src[:80]}...")
-
-    # Look for video sources in <source> elements
+            video_urls.append(('video_src', src))
+        if poster:
+            video_urls.append(('poster', poster))
+    
+    # Look for source elements
     sources = await page.query_selector_all("video source")
     for source in sources:
         src = await source.get_attribute("src")
-        if src and src not in video_urls:
-            video_urls.append(src)
-            print(f"  [Browser] Found <source> src: {src[:80]}...")
-
-    # Look for download links with video extensions
-    links = await page.query_selector_all("a[href*='.mp4'], a[href*='.m3u8'], a[href*='.webm'], a[href*='.mkv']")
-    for link in links[:20]:  # Limit to first 20 links
+        if src:
+            video_urls.append(('source', src))
+    
+    # Look for embed/video URLs
+    embeds = await page.query_selector_all("embed[src*='.mp4'], object[data*='.mp4'], iframe[src*='video'], iframe[src*='player']")
+    for embed in embeds:
+        src = await embed.get_attribute("src")
+        if src:
+            video_urls.append(('embed', src))
+    
+    # Look for data-src attributes (lazy loading)
+    lazy = await page.query_selector_all("[data-src]")
+    for el in lazy:
+        src = await el.get_attribute("data-src")
+        if src and any(x in src.lower() for x in ['.mp4', '.m3u8', '.webm', 'video', 'stream', 'player']):
+            video_urls.append(('data-src', src))
+    
+    # Look for JavaScript configurations
+    scripts = await page.query_selector_all("script")
+    for script in scripts:
+        content = await script.inner_html() or ""
+        # Find URLs in script content
+        urls = re.findall(r'["\']https?://[^"\']+\.(mp4|m3u8|webm)[^"\']*["\']', content)
+        for u in urls:
+            video_urls.append(('script', u.strip('"\'')))
+    
+    # Look for player configuration JSON
+    json_configs = await page.query_selector_all("script[type='application/json'], script[type='application/ld+json']")
+    for cfg in json_configs:
+        content = await cfg.inner_html() or ""
+        urls = re.findall(r'"(?:videoUrl|src|streamUrl|url|file)"["\']?\s*:\s*["\'](https?://[^"\']+)["\']', content)
+        for u in urls:
+            video_urls.append(('json', u))
+    
+    # Look for video page links
+    links = await page.query_selector_all("a[href*='/videos/'], a[href*='/watch/'], a[href*='player']")
+    for link in links[:10]:
         href = await link.get_attribute("href")
         if href:
-            # Skip very small files (likely thumbnails/previews)
-            text = await link.inner_text() or ""
-            if any(x in text.lower() for x in ['preview', 'thumb', 'sample']):
-                continue
             full_url = urljoin(url, href)
-            if full_url not in video_urls:
-                video_urls.append(full_url)
-                print(f"  [Browser] Found download link: {href[:80]}...")
-
-    # Look for data-src attributes (lazy loaded videos)
-    lazy_videos = await page.query_selector_all("[data-src]")
-    for lv in lazy_videos:
-        src = await lv.get_attribute("data-src")
-        if src and src not in video_urls:
-            video_urls.append(src)
-            print(f"  [Browser] Found lazy-loaded video: {src[:80]}...")
-
+            video_urls.append(('page_link', full_url))
+    
     return video_urls
 
-async def find_largest_video(page, url):
-    """Try to find the main/largest video on the page."""
-    video_urls = await find_main_video_on_page(page, url)
-
-    if not video_urls:
-        return None
-
-    # If multiple videos found, try to identify the main one
-    # Usually the main video is in a player container or has specific attributes
-    main_video = None
-
-    # Look for video in player wrapper
-    player = await page.query_selector(".player, #player, .video-player, [class*='player']")
-    if player:
-        videos = await player.query_selector_all("video")
-        for video in videos:
-            src = await video.get_attribute("src")
-            if src:
-                main_video = src
-                print(f"  [Browser] Found video in player: {src[:80]}...")
-                return main_video
-
-    # Otherwise return the first/largest video
-    return video_urls[0] if video_urls else None
+async def try_get_video_from_api(page, url):
+    """Try to find and extract from API endpoints."""
+    # Look for API calls in page
+    apis = await page.evaluate("""() => {
+        const apis = [];
+        // Check for global player config
+        if (window.playerData) apis.push(JSON.stringify(window.playerData));
+        if (window.videoData) apis.push(JSON.stringify(window.videoData));
+        if (window.config) apis.push(JSON.stringify(window.config));
+        if (window.videoConfig) apis.push(JSON.stringify(window.videoConfig));
+        return apis;
+    }""")
+    
+    for api in apis:
+        if api:
+            urls = re.findall(r'["\']?(https?://[^"\'<>\s]+(?:mp4|m3u8|manifest)[^"\'<>\s]*)["\']?', api)
+            for u in urls:
+                if not u.startswith('blob:'):
+                    return u
+    
+    return None
 
 async def download_with_browser(url, filename):
-    """Open URL in browser and find main video."""
+    """Open URL in browser and extract video using multiple methods."""
     print(f"  [Browser] Opening: {url}")
-
+    
     async with async_playwright() as p:
         browser = await p.chromium.launch(headless=True)
         context = await browser.new_context(
             user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120.0.0.0 Safari/537.36",
             viewport={"width": 1920, "height": 1080},
         )
-
+        
         page = await context.new_page()
-
+        
         try:
             await page.goto(url, wait_until="domcontentloaded", timeout=30000)
-            await page.wait_for_timeout(3000)  # Wait for videos to load
-
-            # Try to click play if video is paused
+            
+            # Wait for dynamic content
+            await page.wait_for_timeout(5000)
+            
+            # Try clicking play button if exists
             try:
-                video = await page.query_selector("video")
-                if video:
-                    is_paused = await video.evaluate("el => el.paused")
-                    if is_paused:
-                        await video.click()
-                        await page.wait_for_timeout(2000)
+                play_btn = page.locator("button:has-text('Play'), .play-btn, [class*='play']:visible")
+                if await play_btn.count() > 0:
+                    await play_btn.first.click()
+                    await page.wait_for_timeout(3000)
             except:
                 pass
-
-            # Find main video
-            main_video = await find_largest_video(page, url)
-            await browser.close()
-
-            if main_video:
-                if main_video.startswith("blob:"):
-                    print(f"  [Browser] Blob URL detected - yt-dlp handles these better")
-                    return False
-
+            
+            # Get video URLs found
+            video_urls = await find_video_urls_on_page(page, url)
+            
+            # Print all found URLs
+            for src_type, vurl in video_urls[:15]:
+                print(f"  [Browser] Found [{src_type}]: {vurl[:100]}...")
+            
+            # Try to find a working URL
+            for src_type, vurl in video_urls:
+                if vurl.startswith('blob:'):
+                    # Try to get the source from video element
+                    continue
+                if vurl.startswith('http') and not any(x in vurl for x in ['cloudflare', '403', 'captcha']):
+                    print(f"  [Browser] Trying {src_type} URL...")
+                    dest_path = os.path.join(DOWNLOAD_DIR, filename)
+                    result = subprocess.run(
+                        ['yt-dlp', '-o', dest_path, '--', vurl],
+                        capture_output=True, text=True, timeout=600
+                    )
+                    if result.returncode == 0:
+                        print(f"  [Browser] Success with {src_type}!")
+                        await browser.close()
+                        return True
+                    else:
+                        err_msg = result.stderr[:200] if result.stderr else 'Unknown error'
+                        print(f"  [Browser] Failed: {err_msg}")
+            
+            # Try API extraction
+            api_url = await try_get_video_from_api(page, url)
+            if api_url:
+                print(f"  [Browser] Trying API URL...")
                 dest_path = os.path.join(DOWNLOAD_DIR, filename)
-                print(f"  [Browser] Downloading main video: {main_video[:80]}...")
-
-                # Use yt-dlp to download the video URL
                 result = subprocess.run(
-                    ['yt-dlp', '-o', dest_path, '--', main_video],
+                    ['yt-dlp', '-o', dest_path, '--', api_url],
                     capture_output=True, text=True, timeout=600
                 )
                 if result.returncode == 0:
-                    print(f"  [Browser] Saved: {dest_path}")
+                    print(f"  [Browser] API URL worked!")
+                    await browser.close()
                     return True
-                else:
-                    print(f"  [Browser] yt-dlp failed: {result.stderr[:200]}")
-
-            print(f"  [Browser] No main video found")
+            
+            await browser.close()
+            print(f"  [Browser] No working video URL found")
             return False
-
+            
         except Exception as e:
             print(f"  [Browser] Error: {e}")
             await browser.close()
@@ -183,10 +189,10 @@ async def main():
     if len(sys.argv) < 3:
         print("Usage: browser_download.py <url> <filename>")
         sys.exit(1)
-
+    
     url = sys.argv[1]
     filename = sys.argv[2]
-
+    
     os.makedirs(DOWNLOAD_DIR, exist_ok=True)
     success = await download_with_browser(url, filename)
     sys.exit(0 if success else 1)
