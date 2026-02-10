@@ -12,62 +12,67 @@ from playwright.async_api import async_playwright
 
 DOWNLOAD_DIR = "downloads"
 
-def run_yt_dlp(url, cookies_file=None):
-    """Try yt-dlp with fallback options."""
-    print(f"  [Browser] Trying yt-dlp...")
-    cmd = ['yt-dlp', '--no-playlist', '-o', f'{DOWNLOAD_DIR}/%(title)s.%(ext)s']
-    if cookies_file and os.path.exists(cookies_file):
-        cmd.extend(['--cookies', cookies_file])
-    cmd.extend(['--', url])
-    
-    result = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
-    if result.returncode == 0:
-        return True
-    return False
+VIDEO_EXTENSIONS = ('.mp4', '.m3u8', '.webm', '.mkv', '.avi', '.mov')
+MIN_VIDEO_SIZE = 1024 * 1024  # 1MB minimum for a real video
+
+def is_video_file(filename):
+    """Check if file has video extension."""
+    return any(filename.lower().endswith(ext) for ext in VIDEO_EXTENSIONS)
+
+def get_file_size(path):
+    """Get file size in bytes."""
+    try:
+        return os.path.getsize(path)
+    except:
+        return 0
 
 async def find_video_urls_on_page(page, url):
     """Find all video URLs on page including embed/API sources."""
     video_urls = []
     
-    # Look for video elements
+    # Look for video elements and get their current src
     videos = await page.query_selector_all("video")
     for video in videos:
         src = await video.get_attribute("src")
+        if src and not src.startswith('blob:'):
+            video_urls.append(('video', src))
+        
+        # Try to get the effective src (after any JS processing)
+        try:
+            effective_src = await video.evaluate("el => el.src")
+            if effective_src and effective_src != src and not effective_src.startswith('blob:'):
+                video_urls.append(('video_effective', effective_src))
+        except:
+            pass
+        
+        # Get poster for reference
         poster = await video.get_attribute("poster")
-        if src:
-            video_urls.append(('video_src', src))
         if poster:
             video_urls.append(('poster', poster))
     
-    # Look for source elements
+    # Look for source elements inside video
     sources = await page.query_selector_all("video source")
     for source in sources:
         src = await source.get_attribute("src")
-        if src:
+        if src and not src.startswith('blob:'):
             video_urls.append(('source', src))
     
-    # Look for embed/video URLs
-    embeds = await page.query_selector_all("embed[src*='.mp4'], object[data*='.mp4'], iframe[src*='video'], iframe[src*='player']")
-    for embed in embeds:
-        src = await embed.get_attribute("src")
-        if src:
-            video_urls.append(('embed', src))
-    
-    # Look for data-src attributes (lazy loading)
-    lazy = await page.query_selector_all("[data-src]")
-    for el in lazy:
+    # Look for video sources in data-* attributes
+    data_srcs = await page.query_selector_all("[data-src*='.mp4'], [data-src*='.m3u8'], [data-src*='video']")
+    for el in data_srcs:
         src = await el.get_attribute("data-src")
-        if src and any(x in src.lower() for x in ['.mp4', '.m3u8', '.webm', 'video', 'stream', 'player']):
+        if src and not src.startswith('blob:'):
             video_urls.append(('data-src', src))
     
-    # Look for JavaScript configurations
+    # Look for JavaScript configurations with video URLs
     scripts = await page.query_selector_all("script")
     for script in scripts:
         content = await script.inner_html() or ""
-        # Find URLs in script content
-        urls = re.findall(r'["\']https?://[^"\']+\.(mp4|m3u8|webm)[^"\']*["\']', content)
+        # Find video URLs in script content
+        urls = re.findall(r'["\'](https?://[^"\']+\.(?:mp4|m3u8|webm)[^"\']*)["\']', content)
         for u in urls:
-            video_urls.append(('script', u.strip('"\'')))
+            if not u.startswith('blob:'):
+                video_urls.append(('script', u.strip('"\'')))
     
     # Look for player configuration JSON
     json_configs = await page.query_selector_all("script[type='application/json'], script[type='application/ld+json']")
@@ -75,28 +80,36 @@ async def find_video_urls_on_page(page, url):
         content = await cfg.inner_html() or ""
         urls = re.findall(r'"(?:videoUrl|src|streamUrl|url|file)"["\']?\s*:\s*["\'](https?://[^"\']+)["\']', content)
         for u in urls:
-            video_urls.append(('json', u))
+            if not u.startswith('blob:'):
+                video_urls.append(('json', u))
     
-    # Look for video page links
-    links = await page.query_selector_all("a[href*='/videos/'], a[href*='/watch/'], a[href*='player']")
+    # Look for video download links
+    links = await page.query_selector_all("a[href*='/download/'], a[href*='/get_file/'], a[href*='.mp4']")
     for link in links[:10]:
         href = await link.get_attribute("href")
-        if href:
+        if href and any(x in href.lower() for x in ['.mp4', '.m3u8', 'video', 'download']):
             full_url = urljoin(url, href)
-            video_urls.append(('page_link', full_url))
+            video_urls.append(('download_link', full_url))
     
-    return video_urls
+    # Deduplicate
+    seen = set()
+    unique_urls = []
+    for src_type, vurl in video_urls:
+        if vurl not in seen:
+            seen.add(vurl)
+            unique_urls.append((src_type, vurl))
+    
+    return unique_urls
 
 async def try_get_video_from_api(page, url):
     """Try to find and extract from API endpoints."""
-    # Look for API calls in page
     apis = await page.evaluate("""() => {
         const apis = [];
-        // Check for global player config
         if (window.playerData) apis.push(JSON.stringify(window.playerData));
         if (window.videoData) apis.push(JSON.stringify(window.videoData));
         if (window.config) apis.push(JSON.stringify(window.config));
         if (window.videoConfig) apis.push(JSON.stringify(window.videoConfig));
+        if (window.video) apis.push(JSON.stringify(window.video));
         return apis;
     }""")
     
@@ -104,7 +117,7 @@ async def try_get_video_from_api(page, url):
         if api:
             urls = re.findall(r'["\']?(https?://[^"\'<>\s]+(?:mp4|m3u8|manifest)[^"\'<>\s]*)["\']?', api)
             for u in urls:
-                if not u.startswith('blob:'):
+                if not u.startswith('blob:') and any(x in u.lower() for x in VIDEO_EXTENSIONS):
                     return u
     
     return None
@@ -114,7 +127,6 @@ async def download_with_browser(url, filename, cookies_file=None):
     print(f"  [Browser] Opening: {url}")
     
     async with async_playwright() as p:
-        # Try Chrome first, fall back to Chromium
         browser_path = None
         try:
             browser_path = '/usr/bin/google-chrome'
@@ -158,7 +170,6 @@ async def download_with_browser(url, filename, cookies_file=None):
             ignore_https_errors=True,
         )
         
-        # Stealth: remove webdriver detection
         await context.add_init_script("""
             Object.defineProperty(navigator, 'webdriver', {get: () => undefined});
             Object.defineProperty(navigator, 'plugins', {get: () => [1, 2, 3, 4, 5]});
@@ -169,7 +180,6 @@ async def download_with_browser(url, filename, cookies_file=None):
         page = await context.new_page()
         
         try:
-            # Wait for Cloudflare protection if present
             print(f"  [Browser] Waiting for page to load...")
             await page.goto(url, wait_until="domcontentloaded", timeout=30000)
             
@@ -187,45 +197,67 @@ async def download_with_browser(url, filename, cookies_file=None):
             except:
                 print(f"  [Browser] Could not verify Cloudflare clearance, continuing...")
             
-            # Wait additional time for dynamic content
-            await page.wait_for_timeout(8000)
+            # Wait for dynamic content
+            await page.wait_for_timeout(10000)
             
             # Try clicking play button if exists
             try:
                 play_btn = page.locator("button:has-text('Play'), .play-btn, [class*='play']:visible")
                 if await play_btn.count() > 0:
+                    print(f"  [Browser] Clicking play button...")
                     await play_btn.first.click()
-                    await page.wait_for_timeout(3000)
+                    await page.wait_for_timeout(5000)
             except:
                 pass
             
             # Get video URLs found
             video_urls = await find_video_urls_on_page(page, url)
             
+            # Filter out non-video URLs (posters, images, etc)
+            video_urls = [(src_type, vurl) for src_type, vurl in video_urls 
+                         if not any(x in vurl.lower() for x in ['.jpg', '.jpeg', '.png', '.gif', '.svg', '.webp', 'poster', 'thumbnail', 'avatar', 'logo'])]
+            
             # Print all found URLs
             for src_type, vurl in video_urls[:15]:
-                print(f"  [Browser] Found [{src_type}]: {vurl[:100]}...")
+                print(f"  [Browser] Found [{src_type}]: {vurl[:120]}...")
+            
+            if not video_urls:
+                print(f"  [Browser] No video URLs found on page")
+                await browser.close()
+                return False
             
             # Try to find a working URL
             for src_type, vurl in video_urls:
                 if vurl.startswith('blob:'):
-                    # Try to get the source from video element
                     continue
-                if vurl.startswith('http') and not any(x in vurl for x in ['cloudflare', '403', 'captcha']):
-                    print(f"  [Browser] Trying {src_type} URL...")
-                    dest_path = os.path.join(DOWNLOAD_DIR, filename)
-                    cmd = ['yt-dlp', '-o', dest_path]
-                    if cookies_file and os.path.exists(cookies_file):
-                        cmd.extend(['--cookies', cookies_file])
-                    cmd.extend(['--', vurl])
-                    result = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
-                    if result.returncode == 0:
-                        print(f"  [Browser] Success with {src_type}!")
-                        await browser.close()
-                        return True
-                    else:
-                        err_msg = result.stderr[:200] if result.stderr else 'Unknown error'
-                        print(f"  [Browser] Failed: {err_msg}")
+                if not vurl.startswith('http'):
+                    continue
+                
+                print(f"  [Browser] Trying {src_type} URL...")
+                dest_path = os.path.join(DOWNLOAD_DIR, filename)
+                cmd = ['yt-dlp', '-o', dest_path]
+                if cookies_file and os.path.exists(cookies_file):
+                    cmd.extend(['--cookies', cookies_file])
+                cmd.extend(['--', vurl])
+                
+                result = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
+                
+                if result.returncode == 0:
+                    # Verify it's a real video file
+                    if os.path.exists(dest_path):
+                        size = get_file_size(dest_path)
+                        ext = os.path.splitext(dest_path)[1].lower()
+                        
+                        if size >= MIN_VIDEO_SIZE or ext in VIDEO_EXTENSIONS:
+                            print(f"  [Browser] Success with {src_type}! ({size/1024/1024:.2f} MB)")
+                            await browser.close()
+                            return True
+                        else:
+                            print(f"  [Browser] File too small ({size/1024:.1f} KB), likely not video")
+                            os.remove(dest_path)
+                
+                err_msg = result.stderr[:300] if result.stderr else 'Unknown error'
+                print(f"  [Browser] Failed: {err_msg[:100]}...")
             
             # Try API extraction
             api_url = await try_get_video_from_api(page, url)
@@ -236,11 +268,15 @@ async def download_with_browser(url, filename, cookies_file=None):
                 if cookies_file and os.path.exists(cookies_file):
                     cmd.extend(['--cookies', cookies_file])
                 cmd.extend(['--', api_url])
+                
                 result = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
                 if result.returncode == 0:
-                    print(f"  [Browser] API URL worked!")
-                    await browser.close()
-                    return True
+                    if os.path.exists(dest_path):
+                        size = get_file_size(dest_path)
+                        if size >= MIN_VIDEO_SIZE:
+                            print(f"  [Browser] API URL worked! ({size/1024/1024:.2f} MB)")
+                            await browser.close()
+                            return True
             
             await browser.close()
             print(f"  [Browser] No working video URL found")
