@@ -17,10 +17,17 @@ jobs:
       - name: Install dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y aria2 ffmpeg python3 python3-pip curl
+          sudo apt-get install -y aria2 ffmpeg python3 python3-pip curl wget gnupg
           sudo -v ; curl https://rclone.org/install.sh | sudo bash
           sudo curl -L https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp -o /usr/local/bin/yt-dlp
           sudo chmod a+x /usr/local/bin/yt-dlp
+          
+          # Install Chrome for better Cloudflare bypass
+          wget -q -O - https://dl-ssl.google.com/linux/linux_signing_key.pub | sudo apt-key add -
+          echo "deb [arch=amd64] http://dl.google.com/linux/chrome/deb/ stable main" | sudo tee /etc/apt/sources.list.d/google-chrome.list
+          sudo apt-get update
+          sudo apt-get install -y google-chrome-stable
+          
           pip3 install playwright browser-cookie3 2>&1 | tail -5
           playwright install chromium 2>&1 | tail -3
 

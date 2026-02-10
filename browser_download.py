@@ -114,18 +114,64 @@ async def download_with_browser(url, filename, cookies_file=None):
     print(f"  [Browser] Opening: {url}")
     
     async with async_playwright() as p:
-        browser = await p.chromium.launch(headless=True)
+        # Try Chrome first, fall back to Chromium
+        browser_path = None
+        try:
+            browser_path = '/usr/bin/google-chrome'
+            if not os.path.exists(browser_path):
+                browser_path = None
+        except:
+            pass
+        
+        browser_args = [
+            '--no-sandbox',
+            '--disable-setuid-sandbox',
+            '--disable-dev-shm-usage',
+            '--disable-gpu',
+            '--window-size=1920,1080',
+            '--start-maximized',
+            '--disable-blink-features=AutomationControlled',
+            '--disable-web-security',
+            '--enable-features=NetworkService',
+        ]
+        
+        if browser_path:
+            print(f"  [Browser] Using Chrome")
+            browser = await p.chromium.launch(
+                headless=True,
+                executable_path=browser_path,
+                args=browser_args
+            )
+        else:
+            print(f"  [Browser] Using Chromium")
+            browser = await p.chromium.launch(
+                headless=True,
+                args=browser_args
+            )
+        
         context = await browser.new_context(
-            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120.0.0.0 Safari/537.36",
+            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
             viewport={"width": 1920, "height": 1080},
+            locale="en-US",
+            timezone_id="America/New_York",
+            permissions=[],
+            ignore_https_errors=True,
         )
+        
+        # Stealth: remove webdriver detection
+        await context.add_init_script("""
+            Object.defineProperty(navigator, 'webdriver', {get: () => undefined});
+            Object.defineProperty(navigator, 'plugins', {get: () => [1, 2, 3, 4, 5]});
+            Object.defineProperty(navigator, 'languages', {get: () => ['en-US', 'en']});
+            window.chrome = {runtime: {}, app: {}};
+        """)
         
         page = await context.new_page()
         
         try:
             # Wait for Cloudflare protection if present
             print(f"  [Browser] Waiting for page to load...")
-            await page.goto(url, wait_until="networkidle", timeout=60000)
+            await page.goto(url, wait_until="domcontentloaded", timeout=30000)
             
             # Wait for Cloudflare challenge
             try:
@@ -133,7 +179,8 @@ async def download_with_browser(url, filename, cookies_file=None):
                     () => {
                         return !document.querySelector('#cf-challenge-running') && 
                                !document.querySelector('.challenge-running') &&
-                               !document.querySelector('[id*="challenge"]');
+                               !document.querySelector('[id*="challenge"]') &&
+                               document.readyState === 'complete';
                     }
                 """, timeout=30000)
                 print(f"  [Browser] Cloudflare challenge passed")
@@ -141,7 +188,7 @@ async def download_with_browser(url, filename, cookies_file=None):
                 print(f"  [Browser] Could not verify Cloudflare clearance, continuing...")
             
             # Wait additional time for dynamic content
-            await page.wait_for_timeout(5000)
+            await page.wait_for_timeout(8000)
             
             # Try clicking play button if exists
             try:
