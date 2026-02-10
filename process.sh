@@ -53,15 +53,14 @@ while IFS= read -r link || [ -n "$link" ]; do
         echo "[INFO] Webpage URL detected - using page extraction"
     fi
 
-    # Method 1: yt-dlp first (best for pages AND direct links)
+    # Method 1: yt-dlp first with Cloudflare impersonation
     if command -v yt-dlp &> /dev/null; then
-        echo "[1/3] Trying yt-dlp..."
+        echo "[1/3] Trying yt-dlp with Cloudflare bypass..."
 
         if [ "$IS_WEBPAGE" = true ]; then
-            # For webpages, try with Cloudflare impersonation
+            # Try with impersonation first
             yt-dlp --extractor-args "generic:impersonate" -o "$DOWNLOAD_DIR/%(title)s.%(ext)s" -- "$link" 2>&1
         else
-            # For direct links, use simpler options
             yt-dlp -o "$DOWNLOAD_DIR/%(title)s.%(ext)s" -- "$link" 2>&1
         fi
 
@@ -69,7 +68,15 @@ while IFS= read -r link || [ -n "$link" ]; do
             echo "[✓] yt-dlp succeeded"
             DOWNLOAD_SUCCESS=true
         else
-            echo "[✗] yt-dlp failed"
+            # Retry with cookies if available
+            if [ -f "cookies.txt" ]; then
+                echo "[Retry] Trying with cookies..."
+                yt-dlp --cookies cookies.txt -o "$DOWNLOAD_DIR/%(title)s.%(ext)s" -- "$link" 2>&1
+                if [ $? -eq 0 ]; then
+                    echo "[✓] yt-dlp with cookies succeeded"
+                    DOWNLOAD_SUCCESS=true
+                fi
+            fi
         fi
     fi
 
@@ -91,7 +98,11 @@ while IFS= read -r link || [ -n "$link" ]; do
     if [ "$DOWNLOAD_SUCCESS" = false ] && [ "$IS_WEBPAGE" = true ] && [ -f "browser_download.py" ]; then
         echo "[3/3] Trying browser download..."
         FILENAME=$(echo "$link" | md5sum | cut -c1-16).mp4
-        python3 browser_download.py "$link" "$FILENAME" 2>&1
+        if [ -f "cookies.txt" ]; then
+            python3 browser_download.py "$link" "$FILENAME" "cookies.txt" 2>&1
+        else
+            python3 browser_download.py "$link" "$FILENAME" 2>&1
+        fi
         if [ $? -eq 0 ] && [ -f "$DOWNLOAD_DIR/$FILENAME" ]; then
             echo "[✓] Browser download succeeded"
             DOWNLOAD_SUCCESS=true

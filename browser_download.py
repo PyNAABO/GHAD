@@ -12,13 +12,15 @@ from playwright.async_api import async_playwright
 
 DOWNLOAD_DIR = "downloads"
 
-def run_yt_dlp(url):
+def run_yt_dlp(url, cookies_file=None):
     """Try yt-dlp with fallback options."""
     print(f"  [Browser] Trying yt-dlp...")
-    result = subprocess.run(
-        ['yt-dlp', '--no-playlist', '-o', f'{DOWNLOAD_DIR}/%(title)s.%(ext)s', '--', url],
-        capture_output=True, text=True, timeout=600
-    )
+    cmd = ['yt-dlp', '--no-playlist', '-o', f'{DOWNLOAD_DIR}/%(title)s.%(ext)s']
+    if cookies_file and os.path.exists(cookies_file):
+        cmd.extend(['--cookies', cookies_file])
+    cmd.extend(['--', url])
+    
+    result = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
     if result.returncode == 0:
         return True
     return False
@@ -107,7 +109,7 @@ async def try_get_video_from_api(page, url):
     
     return None
 
-async def download_with_browser(url, filename):
+async def download_with_browser(url, filename, cookies_file=None):
     """Open URL in browser and extract video using multiple methods."""
     print(f"  [Browser] Opening: {url}")
     
@@ -121,9 +123,24 @@ async def download_with_browser(url, filename):
         page = await context.new_page()
         
         try:
-            await page.goto(url, wait_until="domcontentloaded", timeout=30000)
+            # Wait for Cloudflare protection if present
+            print(f"  [Browser] Waiting for page to load...")
+            await page.goto(url, wait_until="networkidle", timeout=60000)
             
-            # Wait for dynamic content
+            # Wait for Cloudflare challenge
+            try:
+                await page.wait_for_function("""
+                    () => {
+                        return !document.querySelector('#cf-challenge-running') && 
+                               !document.querySelector('.challenge-running') &&
+                               !document.querySelector('[id*="challenge"]');
+                    }
+                """, timeout=30000)
+                print(f"  [Browser] Cloudflare challenge passed")
+            except:
+                print(f"  [Browser] Could not verify Cloudflare clearance, continuing...")
+            
+            # Wait additional time for dynamic content
             await page.wait_for_timeout(5000)
             
             # Try clicking play button if exists
@@ -150,10 +167,11 @@ async def download_with_browser(url, filename):
                 if vurl.startswith('http') and not any(x in vurl for x in ['cloudflare', '403', 'captcha']):
                     print(f"  [Browser] Trying {src_type} URL...")
                     dest_path = os.path.join(DOWNLOAD_DIR, filename)
-                    result = subprocess.run(
-                        ['yt-dlp', '-o', dest_path, '--', vurl],
-                        capture_output=True, text=True, timeout=600
-                    )
+                    cmd = ['yt-dlp', '-o', dest_path]
+                    if cookies_file and os.path.exists(cookies_file):
+                        cmd.extend(['--cookies', cookies_file])
+                    cmd.extend(['--', vurl])
+                    result = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
                     if result.returncode == 0:
                         print(f"  [Browser] Success with {src_type}!")
                         await browser.close()
@@ -167,10 +185,11 @@ async def download_with_browser(url, filename):
             if api_url:
                 print(f"  [Browser] Trying API URL...")
                 dest_path = os.path.join(DOWNLOAD_DIR, filename)
-                result = subprocess.run(
-                    ['yt-dlp', '-o', dest_path, '--', api_url],
-                    capture_output=True, text=True, timeout=600
-                )
+                cmd = ['yt-dlp', '-o', dest_path]
+                if cookies_file and os.path.exists(cookies_file):
+                    cmd.extend(['--cookies', cookies_file])
+                cmd.extend(['--', api_url])
+                result = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
                 if result.returncode == 0:
                     print(f"  [Browser] API URL worked!")
                     await browser.close()
@@ -187,14 +206,15 @@ async def download_with_browser(url, filename):
 
 async def main():
     if len(sys.argv) < 3:
-        print("Usage: browser_download.py <url> <filename>")
+        print("Usage: browser_download.py <url> <filename> [cookies.txt]")
         sys.exit(1)
     
     url = sys.argv[1]
     filename = sys.argv[2]
+    cookies_file = sys.argv[3] if len(sys.argv) > 3 else None
     
     os.makedirs(DOWNLOAD_DIR, exist_ok=True)
-    success = await download_with_browser(url, filename)
+    success = await download_with_browser(url, filename, cookies_file)
     sys.exit(0 if success else 1)
 
 if __name__ == "__main__":
